@@ -1,7 +1,7 @@
 import express, { Request, Response } from 'express';
 import cors from 'cors';
-import trainRoutes from './routes/trains';
-import bookingRoutes from './routes/bookings';
+import trainRouter from './routes/trains.js';
+import bookingRouter from './routes/bookings.js';
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -18,8 +18,8 @@ app.get('/api/debug', (_req: Request, res: Response) => {
 });
 
 // Mount routers
-app.use('/api', trainRoutes);
-app.use('/api', bookingRoutes);
+app.use('/api', trainRouter);
+app.use('/api', bookingRouter);
 
 app.listen(PORT, () => {
   console.log(`RailNova API running on http://localhost:${PORT}`);

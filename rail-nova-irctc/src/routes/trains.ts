@@ -1,6 +1,6 @@
 import { Router, Request, Response } from 'express';
-import { trains } from '../data/trains';
-import type { SearchTrainsQuery, Train } from '../types';
+import { trains } from '../data/trains.js';
+import type { SearchTrainsQuery, Train } from '../types.js';
 
 const router = Router();
 

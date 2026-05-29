@@ -1,38 +1,89 @@
 import { Router, Request, Response } from 'express';
-import { randomUUID } from 'crypto';
-import type { Booking } from '../types';
+import pool from '../db.js'; // adjust path if needed
 
 const router = Router();
 
-// in-memory store
-const bookings: Booking[] = [];
+// POST /users/:userId/bookings
+router.post(
+  '/users/:userId/bookings',
+  async (req: Request, res: Response) => {
+    const userId = req.params.userId;
 
-router.post('/bookings', (req: Request, res: Response) => {
-  const { userId, trainNumber, journeyDate, from, to, totalFare } = req.body;
+    const {
+      trainNumber,
+      fromStation,
+      toStation,
+      journeyDate, // e.g. "2026-05-30T10:00:00Z"
+      totalFare,
+    } = req.body as {
+      trainNumber?: string;
+      fromStation?: string;
+      toStation?: string;
+      journeyDate?: string;
+      totalFare?: number;
+    };
 
-  if (!userId || !trainNumber || !journeyDate || !from || !to || !totalFare) {
-    return res.status(400).json({ error: 'Missing fields' });
+    if (
+      !trainNumber ||
+      !fromStation ||
+      !toStation ||
+      !journeyDate ||
+      totalFare == null
+    ) {
+      return res
+        .status(400)
+        .json({ error: 'Missing required fields' });
+    }
+
+    try {
+      const result = await pool.query(
+        `INSERT INTO bookings 
+         (user_id, train_number, from_station, to_station, journey_date, total_fare)
+         VALUES ($1, $2, $3, $4, $5, $6)
+         RETURNING *`,
+        [
+          userId,
+          trainNumber,
+          fromStation,
+          toStation,
+          journeyDate,
+          totalFare,
+        ]
+      );
+
+      res.status(201).json(result.rows[0]);
+    } catch (err) {
+      console.error('Error inserting booking', err);
+      res
+        .status(500)
+        .json({ error: 'Failed to create booking' });
+    }
   }
+);
 
-  const booking: Booking = {
-    id: randomUUID(),
-    userId,
-    trainNumber,
-    journeyDate,
-    from,
-    to,
-    pnr: Math.floor(1e9 + Math.random() * 9e9).toString(),
-    totalFare,
-    status: 'CONFIRMED'
-  };
+// GET /users/:userId/bookings
+router.get(
+  '/users/:userId/bookings',
+  async (req: Request, res: Response) => {
+    const userId = req.params.userId;
 
-  bookings.push(booking);
-  res.status(201).json(booking);
-});
+    try {
+      const result = await pool.query(
+        `SELECT *
+         FROM bookings
+         WHERE user_id = $1
+         ORDER BY created_at DESC`,
+        [userId]
+      );
 
-router.get('/users/:userId/bookings', (req: Request, res: Response) => {
-  const userBookings = bookings.filter(b => b.userId === req.params.userId);
-  res.json(userBookings);
-});
+      res.json(result.rows);
+    } catch (err) {
+      console.error('Error fetching bookings', err);
+      res
+        .status(500)
+        .json({ error: 'Failed to fetch bookings' });
+    }
+  }
+);
 
 export default router;
