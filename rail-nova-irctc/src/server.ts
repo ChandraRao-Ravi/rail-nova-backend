@@ -1,7 +1,7 @@
 import express, { Request, Response } from 'express';
 import cors from 'cors';
-import trainRouter from './routes/trains.js';
-import bookingRouter from './routes/bookings.js';
+import trainRouter from './routes/trains';
+import bookingRouter from './routes/bookings';
 
 const app = express();
 const PORT = process.env.PORT || 3000;
