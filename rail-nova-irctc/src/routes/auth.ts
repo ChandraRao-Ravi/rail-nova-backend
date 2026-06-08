@@ -4,6 +4,7 @@ import { randomUUID } from 'crypto';
 import pool from '../db';
 import { signAccessToken } from '../utils/jwt';
 import { calculateProfileCompletion } from '../utils/profile';
+import { firebaseAdmin } from '../lib/firebaseAdmin';
 
 const router = Router();
 const SALT_ROUNDS = 10;
@@ -143,23 +144,61 @@ router.post('/auth/login', async (req: Request, res: Response) => {
   }
 });
 
-// POST /api/auth/google
-router.post('/auth/google', async (req: Request, res: Response) => {
-  const { googleId, email, fullName } = req.body as {
-    googleId?: string;
-    email?: string | null;
-    fullName?: string | null;
+router.post('/auth/social-login', async (req: Request, res: Response) => {
+  const { provider, firebaseIdToken } = req.body as {
+    provider?: 'google' | 'apple';
+    firebaseIdToken?: string;
   };
 
-  if (!googleId) {
-    return res.status(400).json({ error: 'googleId is required' });
+  if (!provider || !firebaseIdToken) {
+    return res.status(400).json({ error: 'provider and firebaseIdToken are required' });
+  }
+
+  if (!['google', 'apple'].includes(provider)) {
+    return res.status(400).json({ error: 'Unsupported provider' });
   }
 
   try {
-    let result = await pool.query(
-      `SELECT * FROM users WHERE google_id = $1 LIMIT 1`,
-      [googleId]
-    );
+    const decoded = await firebaseAdmin.auth().verifyIdToken(firebaseIdToken);
+
+    const firebaseUid = decoded.uid;
+    const email = decoded.email ?? null;
+    const fullName = (decoded.name as string | undefined) ?? null;
+
+    const identities = decoded.firebase?.identities ?? {};
+    const signInProvider = decoded.firebase?.sign_in_provider ?? null;
+
+    if (provider === 'google' && signInProvider !== 'google.com') {
+      return res.status(400).json({ error: 'Firebase token is not a Google login' });
+    }
+
+    if (provider === 'apple' && signInProvider !== 'apple.com') {
+      return res.status(400).json({ error: 'Firebase token is not an Apple login' });
+    }
+
+    let providerId: string | null = null;
+
+    if (provider === 'google') {
+      const googleIds = identities['google.com'];
+      providerId = Array.isArray(googleIds) && googleIds.length > 0 ? String(googleIds[0]) : firebaseUid;
+    } else if (provider === 'apple') {
+      const appleIds = identities['apple.com'];
+      providerId = Array.isArray(appleIds) && appleIds.length > 0 ? String(appleIds[0]) : firebaseUid;
+    }
+
+    let result;
+
+    if (provider === 'google') {
+      result = await pool.query(
+        `SELECT * FROM users WHERE google_id = $1 LIMIT 1`,
+        [providerId]
+      );
+    } else {
+      result = await pool.query(
+        `SELECT * FROM users WHERE apple_id = $1 LIMIT 1`,
+        [providerId]
+      );
+    }
 
     if (result.rowCount === 0 && email) {
       result = await pool.query(
@@ -180,53 +219,102 @@ router.post('/auth/google', async (req: Request, res: Response) => {
         gender: existing.gender,
       });
 
-      const updated = await pool.query(
-        `UPDATE users
-         SET google_id = $1,
-             email = COALESCE($2, email),
-             full_name = COALESCE($3, full_name),
-             auth_provider = 'google',
-             is_profile_complete = $4,
-             profile_completion_score = $5,
-             updated_at = now()
-         WHERE id = $6
-         RETURNING *`,
-        [
-          googleId,
-          email ?? null,
-          fullName ?? null,
-          mergedProfile.isComplete,
-          mergedProfile.score,
-          existing.id,
-        ]
-      );
-
-      user = updated.rows[0];
+      if (provider === 'google') {
+        const updated = await pool.query(
+          `UPDATE users
+           SET google_id = $1,
+               email = COALESCE($2, email),
+               full_name = COALESCE($3, full_name),
+               auth_provider = 'google',
+               is_email_verified = COALESCE($4, is_email_verified),
+               is_profile_complete = $5,
+               profile_completion_score = $6,
+               updated_at = now()
+           WHERE id = $7
+           RETURNING *`,
+          [
+            providerId,
+            email,
+            fullName,
+            decoded.email_verified ?? null,
+            mergedProfile.isComplete,
+            mergedProfile.score,
+            existing.id,
+          ]
+        );
+        user = updated.rows[0];
+      } else {
+        const updated = await pool.query(
+          `UPDATE users
+           SET apple_id = $1,
+               email = COALESCE($2, email),
+               full_name = COALESCE($3, full_name),
+               auth_provider = 'apple',
+               is_email_verified = COALESCE($4, is_email_verified),
+               is_profile_complete = $5,
+               profile_completion_score = $6,
+               updated_at = now()
+           WHERE id = $7
+           RETURNING *`,
+          [
+            providerId,
+            email,
+            fullName,
+            decoded.email_verified ?? null,
+            mergedProfile.isComplete,
+            mergedProfile.score,
+            existing.id,
+          ]
+        );
+        user = updated.rows[0];
+      }
     } else {
       const profile = calculateProfileCompletion({
-        full_name: fullName ?? null,
-        email: email ?? null,
+        full_name: fullName,
+        email,
       });
 
-      const created = await pool.query(
-        `INSERT INTO users (
-          id, email, password_hash, full_name, google_id, auth_provider,
-          is_profile_complete, profile_completion_score, updated_at
-        )
-        VALUES ($1, $2, $3, $4, $5, 'google', $6, $7, now())
-        RETURNING *`,
-        [
-          `usr_${randomUUID()}`,
-          email ?? null,
-          null,
-          fullName ?? null,
-          googleId,
-          profile.isComplete,
-          profile.score,
-        ]
-      );
-
-      user = created.rows[0];
+      if (provider === 'google') {
+        const created = await pool.query(
+          `INSERT INTO users (
+            id, email, password_hash, full_name, google_id, auth_provider,
+            is_email_verified, is_profile_complete, profile_completion_score, updated_at
+          )
+          VALUES ($1, $2, $3, $4, $5, 'google', $6, $7, $8, now())
+          RETURNING *`,
+          [
+            `usr_${randomUUID()}`,
+            email,
+            null,
+            fullName,
+            providerId,
+            decoded.email_verified ?? false,
+            profile.isComplete,
+            profile.score,
+          ]
+        );
+        user = created.rows[0];
+      } else {
+        const created = await pool.query(
+          `INSERT INTO users (
+            id, email, password_hash, full_name, apple_id, auth_provider,
+            is_email_verified, is_profile_complete, profile_completion_score, updated_at
+          )
+          VALUES ($1, $2, $3, $4, $5, 'apple', $6, $7, $8, now())
+          RETURNING *`,
+          [
+            `usr_${randomUUID()}`,
+            email,
+            null,
+            fullName,
+            providerId,
+            decoded.email_verified ?? false,
+            profile.isComplete,
+            profile.score,
+          ]
+        );
+        user = created.rows[0];
+      }
     }
 
     const accessToken = signAccessToken({
@@ -239,109 +327,8 @@ router.post('/auth/google', async (req: Request, res: Response) => {
       user: mapUser(user),
     });
   } catch (error) {
-    console.error('Google auth error', error);
-    return res.status(500).json({ error: 'Failed to continue with Google' });
-  }
-});
-
-// POST /api/auth/apple
-router.post('/auth/apple', async (req: Request, res: Response) => {
-  const { appleId, email, fullName } = req.body as {
-    appleId?: string;
-    email?: string | null;
-    fullName?: string | null;
-  };
-
-  if (!appleId) {
-    return res.status(400).json({ error: 'appleId is required' });
-  }
-
-  try {
-    let result = await pool.query(
-      `SELECT * FROM users WHERE apple_id = $1 LIMIT 1`,
-      [appleId]
-    );
-
-    if (result.rowCount === 0 && email) {
-      result = await pool.query(
-        `SELECT * FROM users WHERE email = $1 LIMIT 1`,
-        [email]
-      );
-    }
-
-    let user;
-
-    if (result.rowCount && result.rowCount > 0) {
-      const existing = result.rows[0];
-      const mergedProfile = calculateProfileCompletion({
-        full_name: fullName ?? existing.full_name,
-        email: email ?? existing.email,
-        phone: existing.phone,
-        dob: existing.dob,
-        gender: existing.gender,
-      });
-
-      const updated = await pool.query(
-        `UPDATE users
-         SET apple_id = $1,
-             email = COALESCE($2, email),
-             full_name = COALESCE($3, full_name),
-             auth_provider = 'apple',
-             is_profile_complete = $4,
-             profile_completion_score = $5,
-             updated_at = now()
-         WHERE id = $6
-         RETURNING *`,
-        [
-          appleId,
-          email ?? null,
-          fullName ?? null,
-          mergedProfile.isComplete,
-          mergedProfile.score,
-          existing.id,
-        ]
-      );
-
-      user = updated.rows[0];
-    } else {
-      const profile = calculateProfileCompletion({
-        full_name: fullName ?? null,
-        email: email ?? null,
-      });
-
-      const created = await pool.query(
-        `INSERT INTO users (
-          id, email, password_hash, full_name, apple_id, auth_provider,
-          is_profile_complete, profile_completion_score, updated_at
-        )
-        VALUES ($1, $2, $3, $4, $5, 'apple', $6, $7, now())
-        RETURNING *`,
-        [
-          `usr_${randomUUID()}`,
-          email ?? null,
-          null,
-          fullName ?? null,
-          appleId,
-          profile.isComplete,
-          profile.score,
-        ]
-      );
-
-      user = created.rows[0];
-    }
-
-    const accessToken = signAccessToken({
-      sub: user.id,
-      email: user.email,
-    });
-
-    return res.json({
-      accessToken,
-      user: mapUser(user),
-    });
-  } catch (error) {
-    console.error('Apple auth error', error);
-    return res.status(500).json({ error: 'Failed to continue with Apple' });
+    console.error('Social login error', error);
+    return res.status(401).json({ error: 'Invalid or expired Firebase token' });
   }
 });
 
